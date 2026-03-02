@@ -244,7 +244,7 @@ html,body{height:100%;background:var(--bg);font-family:'Tenor Sans',serif;}
     <div class="err-bar" id="errBar"></div>
     <div class="inp-wrap">
       <div class="inp-row">
-        <textarea class="inp" id="chatInput" placeholder="Talk to Athena, or dump your tasks here…" rows="1"></textarea>
+        <textarea class="inp" id="chatInput" placeholder="Talk to Athena — tell her your tasks and she'll add them to your board" rows="1"></textarea>
         <button class="send" id="sendBtn">›</button>
       </div>
     </div>
@@ -371,8 +371,25 @@ const $$   = sel => document.querySelectorAll(sel);
 
 // ─── Storage ──────────────────────────────────────────────────
 const K = {key:'ath_key',mem:'ath_mem',chat:'ath_chat',tasks:'ath_tasks',fus:'ath_fus'};
-const load = k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
-const save = (k,v) => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} };
+const load = k => {
+  try {
+    const raw = localStorage.getItem(k);
+    if (raw === null || raw === 'undefined' || raw === '') return null;
+    const parsed = JSON.parse(raw);
+    return parsed;
+  } catch(e) {
+    console.warn('Load failed for', k, e);
+    return null;
+  }
+};
+const save = (k,v) => {
+  try {
+    if (v === undefined) return;
+    localStorage.setItem(k, JSON.stringify(v));
+  } catch(e) {
+    console.warn('Save failed for', k, e);
+  }
+};
 
 // ─── Urgency ──────────────────────────────────────────────────
 const U = {
@@ -480,12 +497,22 @@ YOUR RULES:
 2. Draft everything when asked — produce the full email/message/doc immediately
 3. Know his people — remember personality notes and what they owe
 4. Push back when he's avoiding something or not thinking at Director level
-5. End substantive responses with ACTION ITEMS: [numbered list]`;
+5. End substantive responses with ACTION ITEMS: [numbered list]
+
+BOARD SYNC RULES:
+When the user clearly lists tasks, mentions new commitments, says something is done, or asks you to add/update items — append a JSON block at the very end of your reply in this exact format (invisible to the user):
+[BOARD_UPDATE]{"add_tasks":[{"text":"...","section":"work|personal|contributions","urgency":"critical|high|medium|low"}],"add_followups":[{"person":"...","task":"..."}],"complete_task_ids":[],"complete_fu_ids":[]}[/BOARD_UPDATE]
+
+Current task IDs for completion: ${S.tasks.map(t=>`${t.id}:${t.text.slice(0,30)}`).join(', ')||'none'}
+Current followup IDs: ${S.fus.map(f=>`${f.id}:${f.person}`).join(', ')||'none'}
+
+IMPORTANT: Only emit [BOARD_UPDATE] when there is something concrete to add or complete. Do NOT emit it for casual conversation. If unsure whether something is a real task, ask Archil to confirm before adding.`;
 }
 
 // ─── Format message ───────────────────────────────────────────
 function fmtMsg(text, el) {
   el.innerHTML = '';
+  text = text.replace(/\[BOARD_UPDATE\][\s\S]*?\[\/BOARD_UPDATE\]/g, '').trim();
   text.split('\n').forEach(ln => {
     if (!ln.trim()) { const d=document.createElement('div'); d.style.height='7px'; el.appendChild(d); return; }
     const d = document.createElement('div');
@@ -686,55 +713,50 @@ function renderChat() {
   $('sendBtn').disabled = S.busy;
 }
 
-// ─── Local board sync ────────────────────────────────────────
-// Only called when user explicitly asks to add tasks
-function syncBoardFromText(userText, replyText) {
-  // Parse lines from user input — treat as task dump
-  const lines = userText.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 5 && l.length < 200);
-  let changed = false;
+// ─── Smart board sync from Athena reply ──────────────────────
+// Athena's reply may contain a JSON block like:
+// [BOARD_UPDATE]{"add_tasks":[...],"add_followups":[...],"complete_task_ids":[...],"complete_fu_ids":[...]}[/BOARD_UPDATE]
+// We parse this and update the board. Athena decides when to emit this block.
+function applyBoardUpdate(reply) {
+  const match = reply.match(/\[BOARD_UPDATE\](.*?)\[\/BOARD_UPDATE\]/s);
+  if (!match) return;
+  try {
+    const p = JSON.parse(match[1].trim());
+    let changed = false;
 
-  // Skip lines that are clearly instructions, not tasks
-  const skipPatterns = [
-    /^(add|put|classify|move|save|store|please|can you|could you|would you)/i,
-    /^(yes|no|ok|okay|sure|thanks|hi|hey|hello|good)/i,
-    /^(and add|all of this|the following|these tasks|this to)/i,
-    /\?$/,
-  ];
-
-  lines.forEach(line => {
-    if (skipPatterns.some(p => p.test(line))) return;
-    if (line.length < 8) return;
-
-    const result = classify(line);
-
-    if (result.section === 'followups' && result.person) {
-      const exists = S.fus.some(f =>
-        f.person.toLowerCase() === result.person.toLowerCase()
-      );
-      if (!exists) {
-        S.fus = [...S.fus, {id:uid(), person:result.person, task:result.task||line, status:'pending', ts:Date.now()}];
+    (p.add_tasks||[]).forEach(t => {
+      if (!S.tasks.some(x=>x.text.toLowerCase()===t.text.toLowerCase())) {
+        S.tasks = [...S.tasks, {id:uid(), text:t.text, section:t.section||'work', urgency:t.urgency||'medium', done:false, ts:Date.now()}];
         changed = true;
       }
-    } else if (['work','personal','contributions'].includes(result.section)) {
-      const exists = S.tasks.some(x => x.text.toLowerCase().trim() === line.toLowerCase().trim());
-      if (!exists) {
-        S.tasks = [...S.tasks, {id:uid(), text:line, section:result.section, urgency:result.urgency||'medium', done:false, ts:Date.now()}];
+    });
+    (p.add_followups||[]).forEach(f => {
+      if (!S.fus.some(x=>x.person.toLowerCase()===f.person.toLowerCase()&&x.task.toLowerCase()===f.task.toLowerCase())) {
+        S.fus = [...S.fus, {id:uid(), person:f.person, task:f.task, status:'pending', ts:Date.now()}];
         changed = true;
       }
+    });
+    (p.complete_task_ids||[]).forEach(id => {
+      S.tasks = S.tasks.map(t=>t.id===id?{...t,done:true}:t);
+      changed = true;
+    });
+    (p.complete_fu_ids||[]).forEach(id => {
+      S.fus = S.fus.map(f=>f.id===id?{...f,status:'done'}:f);
+      changed = true;
+    });
+    if (changed) {
+      save(K.tasks,S.tasks); save(K.fus,S.fus);
+      ['work','personal','contributions'].forEach(renderTaskList);
+      renderFollowups(); updateBadges();
     }
-  });
-
-  if (changed) {
-    save(K.tasks, S.tasks); save(K.fus, S.fus);
-    ['work','personal','contributions'].forEach(renderTaskList);
-    renderFollowups(); updateBadges();
-  }
+  } catch(e) { console.warn('Board update parse error', e); }
 }
 
 // ─── Send ─────────────────────────────────────────────────────
 async function sendMsg(text) {
   text = text?.trim(); if(!text||S.busy)return;
   const inp=$('chatInput'); if(inp){inp.value='';inp.style.height='42px';}
+
   S.messages=[...S.messages,{role:'user',content:text,ts:Date.now()}];
   S.busy=true; renderChat();
 
@@ -746,6 +768,7 @@ async function sendMsg(text) {
     const reply=await callClaude(systemPrompt(),apiMsgs);
     S.messages=[...S.messages,{role:'assistant',content:reply,ts:Date.now()}];
     save(K.chat,S.messages.slice(-100));
+    applyBoardUpdate(reply);
 
     // Background: memory update
     setTimeout(async()=>{
@@ -765,11 +788,8 @@ async function sendMsg(text) {
       } catch{}
     },200);
 
-    // Board sync — only when user explicitly asks to add tasks to board
-    const addIntent = /add (this|these|it|that|all|tasks?|items?)|put (this|these|all) (on|in|to) (my )?(board|list|work|personal|follow.?up|contributions?)|classify (this|these)|add to (board|work|personal)/i;
-    if (addIntent.test(text)) {
-      syncBoardFromText(text);
-    }
+    // Tasks are NEVER auto-added from chat.
+    // Use the + Add button on each tab, or type /add followed by your task list.
 
   } catch(e) {
     if(errBar){
@@ -872,7 +892,7 @@ function init() {
       const k=$('keyInput').value.trim();
       if(!k.startsWith('gsk_')){$('keyErr').textContent='Invalid key. Should start with gsk_…';$('keyErr').style.display='block';return;}
       S.apiKey=k; save(K.key,k);
-      if(!S.messages.length) S.messages=[{role:'assistant',content:`Good ${tod()}, Archil.\n\nAthena is live and ready.\n\nTo get started, just dump everything on your plate right here — tasks, follow-ups, things you're tracking, anything. One line each or one big paragraph, doesn't matter. I'll classify it all and populate your board automatically.`,ts:Date.now()}];
+      if(!S.messages.length) S.messages=[{role:'assistant',content:`Good ${tod()}, Archil. Athena is live.\n\nTo add tasks to your board, type /add followed by your list — one item per line. I'll classify each one and route it to the right tab automatically.\n\nFor everything else, just talk to me normally.`,ts:Date.now()}];
       initMain();
     };
     return;
@@ -902,7 +922,7 @@ function initMain() {
   dumpBtn.style.cssText='border-color:rgba(200,168,100,.3);color:#c8a864;';
   dumpBtn.onclick=()=>{
     const inp=$('chatInput');
-    inp.value='Here is my full task dump — please classify and add everything to my board:\n';
+    inp.value='Here are my tasks for today:\n';
     inp.focus(); inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,110)+'px';
   };
   qaBar.appendChild(dumpBtn);
@@ -1030,6 +1050,12 @@ function initMain() {
   switchTab('chat');
   ['work','personal','contributions'].forEach(renderTaskList);
   renderFollowups(); updateBadges(); updateMemPanel();
+
+  // Re-save everything on load to ensure storage is fresh
+  save(K.tasks, S.tasks);
+  save(K.fus, S.fus);
+  save(K.mem, S.mem);
+  if (S.messages.length) save(K.chat, S.messages.slice(-100));
 }
 
 init();
