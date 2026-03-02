@@ -525,33 +525,46 @@ function classify(text) {
 
 // ─── Claude API ───────────────────────────────────────────────
 async function callClaude(system, messages, maxTokens=900) {
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'Authorization': 'Bearer ' + S.apiKey,
-      'HTTP-Referer': 'https://athena-cos.github.io',
-      'X-Title': 'Athena Chief of Staff',
-    },
-    body: JSON.stringify({
-      model: 'meta-llama/llama-3.3-70b-instruct:free',
-      max_tokens: maxTokens,
-      temperature: 0.7,
-      messages: [
-        { role: 'system', content: system },
-        ...messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content }))
-      ]
-    })
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    const e = JSON.parse(text);
-    throw new Error(e?.error?.message || `API ${res.status}`);
+  // Free models in priority order — tries next if one fails
+  const MODELS = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'mistralai/mistral-7b-instruct:free',
+    'google/gemma-3-12b-it:free',
+    'qwen/qwen2.5-72b-instruct:free',
+  ];
+
+  const body = {
+    max_tokens: maxTokens,
+    temperature: 0.7,
+    messages: [
+      { role: 'system', content: system },
+      ...messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content }))
+    ]
+  };
+
+  let lastError = '';
+  for (const model of MODELS) {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'Authorization': 'Bearer ' + S.apiKey,
+          'HTTP-Referer': 'https://athena-cos.github.io',
+          'X-Title': 'Athena Chief of Staff',
+        },
+        body: JSON.stringify({...body, model}),
+      });
+      const text = await res.text();
+      const j = JSON.parse(text);
+      const reply = j?.choices?.[0]?.message?.content;
+      if (reply) return reply;
+      lastError = j?.error?.message || 'Empty response';
+    } catch(e) {
+      lastError = e.message;
+    }
   }
-  const j = JSON.parse(text);
-  const reply = j?.choices?.[0]?.message?.content;
-  if (!reply) throw new Error('Empty response');
-  return reply;
+  throw new Error('All models failed: ' + lastError);
 }
 
 function memStr() {
