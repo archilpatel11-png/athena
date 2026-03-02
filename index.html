@@ -204,8 +204,8 @@ html,body{height:100%;background:var(--bg);font-family:'Tenor Sans',serif;}
   <div class="key-screen">
     <div class="key-big"><span style="font-family:'Cormorant Garamond',serif;font-size:30px;color:#c8a864">Λ</span></div>
     <h2 style="font-family:'Cormorant Garamond',serif;font-size:26px;font-weight:300;color:#e8dfc8;letter-spacing:5px;text-transform:uppercase;margin-bottom:8px">Athena</h2>
-    <p style="font-family:'DM Mono',monospace;font-size:9.5px;color:#6a5a40;letter-spacing:1px;line-height:2;margin-bottom:26px">Your full Chief of Staff — proactive, opinionated,<br>one step ahead. Free with OpenRouter.</p>
-    <input id="keyInput" type="password" placeholder="AIza..." style="width:100%;max-width:380px;background:#14110a;border:1px solid #272010;border-radius:var(--r);padding:11px 14px;font-family:'DM Mono',monospace;font-size:12px;color:#e8dfc8;outline:none;text-align:center;transition:border-color .18s;">
+    <p style="font-family:'DM Mono',monospace;font-size:9.5px;color:#6a5a40;letter-spacing:1px;line-height:2;margin-bottom:26px">Your full Chief of Staff — proactive, opinionated,<br>one step ahead. Free with Groq.</p>
+    <input id="keyInput" type="password" placeholder="gsk_..." style="width:100%;max-width:380px;background:#14110a;border:1px solid #272010;border-radius:var(--r);padding:11px 14px;font-family:'DM Mono',monospace;font-size:12px;color:#e8dfc8;outline:none;text-align:center;transition:border-color .18s;">
     <button id="keyBtn" style="margin-top:10px;width:100%;max-width:380px;background:linear-gradient(135deg,#c8a864,#8a6020);border:none;border-radius:var(--r);padding:12px;font-family:'DM Mono',monospace;font-size:10px;color:#090805;font-weight:700;cursor:pointer;letter-spacing:1.5px;text-transform:uppercase;">Activate Athena →</button>
     <div id="keyErr" style="display:none;font-family:'DM Mono',monospace;font-size:9px;color:#d08080;margin-top:10px;"></div>
     <p style="font-family:'DM Mono',monospace;font-size:8px;color:#3a3020;margin-top:14px;line-height:1.8">Free. Get your key at console.groq.com → API Keys</p>
@@ -426,7 +426,7 @@ const sbFetch = async (path, opts={}) => {
 
 // Push all data to Supabase (upsert single row for this user)
 const sbPush = async () => {
-  if (!sbReady()) return;
+  if (!sbReady()) return false;
   const payload = {
     uid: SB.uid,
     tasks: JSON.stringify(S.tasks),
@@ -435,11 +435,12 @@ const sbPush = async () => {
     chat: JSON.stringify(S.messages.slice(-100)),
     updated_at: new Date().toISOString(),
   };
-  await sbFetch('athena_data?uid=eq.' + SB.uid, {
+  const result = await sbFetch('athena_data?uid=eq.' + SB.uid, {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
     body: JSON.stringify(payload),
   });
+  return result !== null;
 };
 
 // Pull latest data from Supabase and merge into state
@@ -571,30 +572,25 @@ function memStr() {
 }
 
 function systemPrompt() {
-  const t=S.tasks, f=S.fus;
   return `You are Athena — Archil's AI Chief of Staff. Sharp, proactive, direct. Like Donna from Suits.
 
-ARCHIL: Senior Manager at Meesho AI Services, 10+ reports, targeting Director promotion.
+ARCHIL: Senior Manager at Meesho AI Services, 10+ direct reports, targeting Director promotion.
 
-BOARD:
+CURRENT BOARD:
 Work: ${S.tasks.filter(t=>t.section==='work'&&!t.done).map(t=>`[${t.id}][${t.urgency}] ${t.text}`).join(' | ')||'empty'}
 Personal: ${S.tasks.filter(t=>t.section==='personal'&&!t.done).map(t=>`[${t.id}] ${t.text}`).join(' | ')||'empty'}
 Contributions: ${S.tasks.filter(t=>t.section==='contributions'&&!t.done).map(t=>`[${t.id}] ${t.text}`).join(' | ')||'empty'}
-Follow-ups: ${S.fus.filter(f=>f.status==='pending').map(f=>`[${f.id}] ${f.person}: ${f.task}`).join(' | ')||'none'}
+Follow-ups pending: ${S.fus.filter(f=>f.status==='pending').map(f=>`[${f.id}] ${f.person}: ${f.task}`).join(' | ')||'none'}
 
 MEMORY: ${memStr()}
 TODAY: ${new Date().toLocaleDateString('en-IN',{weekday:'long',month:'long',day:'numeric'})}
 
 RULES:
-1. Be proactive — flag what needs attention
-2. Draft everything when asked — full email/message immediately
-3. Push back when he's avoiding something
-4. End with ACTION ITEMS: [numbered list] when relevant
-5. BOARD SYNC: When user clearly states tasks or completions, append at end:
-[BOARD_UPDATE]{"add_tasks":[{"text":"...","section":"work|personal|contributions","urgency":"critical|high|medium|low"}],"add_followups":[{"person":"...","task":"..."}],"complete_task_ids":[],"complete_fu_ids":[]}[/BOARD_UPDATE]
-Current task IDs: ${S.tasks.filter(t=>!t.done).map(t=>`${t.id}:${t.text.slice(0,20)}`).join(', ')||'none'}
-Current FU IDs: ${S.fus.filter(f=>f.status!=='done').map(f=>`${f.id}:${f.person}`).join(', ')||'none'}
-Only emit BOARD_UPDATE for clear actionable items. If unsure, ask first.`
+1. Be proactive — flag what needs attention without being asked
+2. Draft everything when asked — produce the full email/message immediately
+3. Push back when he is avoiding something or not thinking at Director level
+4. End substantive responses with ACTION ITEMS: [numbered list]
+5. Be concise and direct — no filler words`;
 }
 
 // ─── Format message ───────────────────────────────────────────
@@ -801,43 +797,81 @@ function renderChat() {
   $('sendBtn').disabled = S.busy;
 }
 
-// ─── Smart board sync from Athena reply ──────────────────────
-// Athena's reply may contain a JSON block like:
-// [BOARD_UPDATE]{"add_tasks":[...],"add_followups":[...],"complete_task_ids":[...],"complete_fu_ids":[...]}[/BOARD_UPDATE]
-// We parse this and update the board. Athena decides when to emit this block.
-function applyBoardUpdate(reply) {
-  const match = reply.match(/\[BOARD_UPDATE\](.*?)\[\/BOARD_UPDATE\]/s);
-  if (!match) return;
+// ─── Board extraction ────────────────────────────────────────
+// After every message, run a dedicated small call to extract board changes.
+// This is separate from the main chat call — focused, short, reliable.
+async function extractAndUpdateBoard(userText, athenaReply) {
   try {
-    const p = JSON.parse(match[1].trim());
+    const currentTasks = S.tasks.filter(t=>!t.done).map(t=>`[${t.id}] ${t.section}: ${t.text}`).join('\n') || 'none';
+    const currentFUs   = S.fus.filter(f=>f.status!=='done').map(f=>`[${f.id}] ${f.person}: ${f.task}`).join('\n') || 'none';
+
+    const prompt = `You are a task extractor. Return ONLY valid JSON, nothing else. No explanation.
+
+CURRENT TASKS:
+${currentTasks}
+
+CURRENT FOLLOW-UPS:
+${currentFUs}
+
+USER SAID: ${userText}
+ATHENA SAID: ${athenaReply.slice(0, 500)}
+
+Return this exact JSON structure:
+{"add_tasks":[],"add_followups":[],"complete_task_ids":[],"complete_fu_ids":[]}
+
+Rules:
+- add_tasks: array of {text, section, urgency} — only NEW tasks not already on board. section = work/personal/contributions. urgency = critical/high/medium/low
+- add_followups: array of {person, task} — only new follow-ups
+- complete_task_ids: array of existing task IDs the user said are done
+- complete_fu_ids: array of existing FU IDs that are resolved
+- Return empty arrays if nothing changed
+- Do NOT add tasks that are already on the board
+- Only add tasks if user is clearly stating something actionable they need to do`;
+
+    const r = await callClaude('You are a JSON extraction assistant. Return only valid JSON.', [{role:'user', content:prompt}], 400);
+    // Strip any markdown
+    const clean = r.replace(/```json|```/gi, '').trim();
+    // Find JSON object
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+    const p = JSON.parse(jsonMatch[0]);
     let changed = false;
 
     (p.add_tasks||[]).forEach(t => {
-      if (!S.tasks.some(x=>x.text.toLowerCase()===t.text.toLowerCase())) {
-        S.tasks = [...S.tasks, {id:uid(), text:t.text, section:t.section||'work', urgency:t.urgency||'medium', done:false, ts:Date.now()}];
-        changed = true;
-      }
+      if (!t.text || t.text.length < 3) return;
+      if (S.tasks.some(x => x.text.toLowerCase().trim() === t.text.toLowerCase().trim())) return;
+      S.tasks = [...S.tasks, {
+        id: uid(), text: t.text,
+        section: ['work','personal','contributions'].includes(t.section) ? t.section : 'work',
+        urgency: ['critical','high','medium','low'].includes(t.urgency) ? t.urgency : 'medium',
+        done: false, ts: Date.now()
+      }];
+      changed = true;
     });
+
     (p.add_followups||[]).forEach(f => {
-      if (!S.fus.some(x=>x.person.toLowerCase()===f.person.toLowerCase()&&x.task.toLowerCase()===f.task.toLowerCase())) {
-        S.fus = [...S.fus, {id:uid(), person:f.person, task:f.task, status:'pending', ts:Date.now()}];
-        changed = true;
-      }
+      if (!f.person || !f.task) return;
+      if (S.fus.some(x => x.person.toLowerCase()===f.person.toLowerCase() && x.task.toLowerCase()===f.task.toLowerCase())) return;
+      S.fus = [...S.fus, {id:uid(), person:f.person, task:f.task, status:'pending', ts:Date.now()}];
+      changed = true;
     });
+
     (p.complete_task_ids||[]).forEach(id => {
-      S.tasks = S.tasks.map(t=>t.id===id?{...t,done:true}:t);
-      changed = true;
+      if (S.tasks.some(t=>t.id===id)) { S.tasks = S.tasks.map(t=>t.id===id?{...t,done:true}:t); changed=true; }
     });
+
     (p.complete_fu_ids||[]).forEach(id => {
-      S.fus = S.fus.map(f=>f.id===id?{...f,status:'done'}:f);
-      changed = true;
+      if (S.fus.some(f=>f.id===id)) { S.fus = S.fus.map(f=>f.id===id?{...f,status:'done'}:f); changed=true; }
     });
+
     if (changed) {
       saveAll();
       ['work','personal','contributions'].forEach(renderTaskList);
       renderFollowups(); updateBadges();
     }
-  } catch(e) { console.warn('Board update parse error', e); }
+  } catch(e) {
+    console.warn('Board extraction error:', e);
+  }
 }
 
 // ─── Send ─────────────────────────────────────────────────────
@@ -852,15 +886,22 @@ async function sendMsg(text) {
   if(errBar) errBar.style.display='none';
 
   try {
-    const apiMsgs=S.messages.slice(-10).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
-    const reply=await callClaude(systemPrompt(),apiMsgs,600);
+    const apiMsgs=S.messages.slice(-20).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content.replace(/\[BOARD_UPDATE\][\s\S]*?\[\/BOARD_UPDATE\]/g,'').trim()}));
+    const reply=await callClaude(systemPrompt(),apiMsgs,1200);
     S.messages=[...S.messages,{role:'assistant',content:reply,ts:Date.now()}];
+    // Simple local memory update — no extra API call
+    S.mem.lastSeen = new Date().toLocaleDateString('en-IN',{weekday:'short',month:'short',day:'numeric'});
+    // Capture wins from user messages
+    const winMatch = text.match(/(?:completed|finished|shipped|launched|closed|won|delivered)\s+(.{5,60})/i);
+    if (winMatch) {
+      S.mem.wins = [...new Set([...(S.mem.wins||[]), winMatch[1].trim()])].slice(-20);
+    }
     saveAll();
-    applyBoardUpdate(reply);
-
-
-    // Tasks are NEVER auto-added from chat.
-    // Use the + Add button on each tab, or type /add followed by your task list.
+    // Only run board extraction if message is substantive
+    const trivial = /^(ok|okay|yes|no|sure|thanks|thank you|got it|noted|great|good|cool|fine|alright|bye|hi|hello|hey)[\s.!]*$/i;
+    if (!trivial.test(text.trim())) {
+      extractAndUpdateBoard(text, reply);
+    }
 
   } catch(e) {
     if(errBar){
@@ -963,7 +1004,7 @@ function init() {
       const k=$('keyInput').value.trim();
       if(!k.startsWith('gsk_') && !k.startsWith('sk-')){$('keyErr').textContent='Invalid key format.';$('keyErr').style.display='block';return;}
       S.apiKey=k; save(K.key,k);
-      if(!S.messages.length) S.messages=[{role:'assistant',content:`Good ${tod()}, Archil. Athena is live.\n\nTo add tasks to your board, type /add followed by your list — one item per line. I'll classify each one and route it to the right tab automatically.\n\nFor everything else, just talk to me normally.`,ts:Date.now()}];
+      if(!S.messages.length) S.messages=[{role:'assistant',content:`Good ${tod()}, Archil. Athena is live. Tell me what's on your plate and I'll organise it.\n\nJust talk normally — I'll add tasks to your board when you mention them. Or tap ⊕ Dump tasks to paste a full list.`,ts:Date.now()}];
       initMain();
     };
     return;
@@ -973,6 +1014,11 @@ function init() {
 
 function initMain() {
   $('keyScreen').style.display='none'; $('mainApp').style.display='flex';
+  // Ensure there's always a welcome message
+  if (!S.messages.length) {
+    S.messages = [{role:'assistant', content:`Good ${tod()}, Archil. Athena is live.\n\nTell me what's on your plate — I'll organise your board. Or just talk, I'll figure it out.`, ts:Date.now()}];
+    save(K.chat, S.messages);
+  }
 
   // Quick actions
   const QA=[
@@ -1042,13 +1088,15 @@ function initMain() {
       el.style.color = '#3a3020';
     }
   };
-  // Pre-fill Supabase credentials if not already saved
+  // Pre-fill Supabase credentials and auto-connect
   if (!SB.url) {
-    const preUrl  = 'https://cxteoplbaliywztcsuyc.supabase.co';
-    const preAnon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4dGVvcGxiYWxpeXd6dGNzdXljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NzEwMTIsImV4cCI6MjA4ODA0NzAxMn0.qHXls6In76yUhSDuZsKDx7yqOIAKQ5nzgMTE2dEo1PY';
-    if ($('sbUrl'))  $('sbUrl').value  = preUrl;
-    if ($('sbAnon')) $('sbAnon').value = preAnon;
+    SB.url  = 'https://cxteoplbaliywztcsuyc.supabase.co';
+    SB.anon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4dGVvcGxiYWxpeXd6dGNzdXljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NzEwMTIsImV4cCI6MjA4ODA0NzAxMn0.qHXls6In76yUhSDuZsKDx7yqOIAKQ5nzgMTE2dEo1PY';
+    localStorage.setItem('ath_sb_url',  SB.url);
+    localStorage.setItem('ath_sb_anon', SB.anon);
   }
+  if ($('sbUrl'))  $('sbUrl').value  = SB.url;
+  if ($('sbAnon')) $('sbAnon').value = SB.anon;
   updateSbStatus();
 
   $('sbSaveBtn').addEventListener('click', async () => {
@@ -1061,18 +1109,10 @@ function initMain() {
     localStorage.setItem('ath_sb_url',  url);
     localStorage.setItem('ath_sb_anon', anon);
     $('sbStatus').textContent = 'Testing connection…';
-    // Create table if needed, then push
     await sbEnsureTable();
     const pushed = await sbPush();
-    // Pre-fill Supabase credentials if not already saved
-  if (!SB.url) {
-    const preUrl  = 'https://cxteoplbaliywztcsuyc.supabase.co';
-    const preAnon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4dGVvcGxiYWxpeXd6dGNzdXljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NzEwMTIsImV4cCI6MjA4ODA0NzAxMn0.qHXls6In76yUhSDuZsKDx7yqOIAKQ5nzgMTE2dEo1PY';
-    if ($('sbUrl'))  $('sbUrl').value  = preUrl;
-    if ($('sbAnon')) $('sbAnon').value = preAnon;
-  }
-  updateSbStatus();
-    if (pushed !== false) alert('Connected! Your data is now syncing across all devices.');
+    updateSbStatus();
+    if (pushed !== false) alert('Connected! Your data syncs across all devices.');
     else alert('Could not connect — check your URL and key.');
   });
 
@@ -1134,40 +1174,6 @@ function initMain() {
     };
     reader.readAsText(file);
     e.target.value = ''; // reset so same file can be re-imported
-  });
-
-  // Dump
-  $('classifyBtn').addEventListener('click',()=>{
-    const text=$('dumpInput').value.trim(); if(!text)return;
-    const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
-    const parsed=lines.map(line=>({line,...classify(line)}));
-    const prev=$('dumpPreview'); const items=$('previewItems');
-    const icons={work:'◈',personal:'◉',followups:'↻',contributions:'✦'};
-    const colors={work:'#c8a864',personal:'#7a9fe0',followups:'#e08030',contributions:'#b87fe0'};
-    items.innerHTML=parsed.map(r=>`
-      <div class="prev-item">
-        <span style="font-size:11px;color:${colors[r.section]}">${icons[r.section]}</span>
-        <div style="flex:1">
-          <div style="font-size:12.5px;color:#e8dfc8;font-family:'Tenor Sans',serif">${r.person?`${r.person} → ${r.task}`:r.line}</div>
-          <div style="display:flex;gap:6px;margin-top:3px">
-            <span style="font-family:'DM Mono',monospace;font-size:7.5px;color:${colors[r.section]}">${r.section}</span>
-            ${r.urgency?`<span style="font-family:'DM Mono',monospace;font-size:7.5px;color:${U[r.urgency].color}">· ${U[r.urgency].label}</span>`:''}
-          </div>
-        </div>
-      </div>`).join('');
-    prev.style.display='block';
-    $('dumpEditBtn').onclick=()=>{ prev.style.display='none'; };
-    $('dumpConfirmBtn').onclick=()=>{
-      parsed.forEach(r=>{
-        const id=uid();
-        if(r.section==='followups'){S.fus=[...S.fus,{id,person:r.person||'?',task:r.task||r.line,status:'pending',ts:Date.now()}];}
-        else{S.tasks=[...S.tasks,{id,section:r.section,text:r.line,urgency:r.urgency||'medium',done:false,ts:Date.now()}];}
-      });
-      saveAll(); save(K.fus,S.fus);
-      $('dumpInput').value=''; prev.style.display='none';
-      ['work','personal','contributions'].forEach(renderTaskList); renderFollowups(); updateBadges();
-      switchTab('work');
-    };
   });
 
   // Add task buttons
