@@ -687,52 +687,37 @@ function renderChat() {
 }
 
 // ─── Local board sync ────────────────────────────────────────
-function syncBoardFromText(combined) {
-  const t = combined.toLowerCase();
+// Only called when user explicitly asks to add tasks
+function syncBoardFromText(userText, replyText) {
+  // Parse lines from user input — treat as task dump
+  const lines = userText.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 5 && l.length < 200);
   let changed = false;
 
-  // Mark tasks done
-  const donePatterns = [
-    /(?:done|finished|completed|closed|resolved|sorted)\s+(?:with\s+)?(.{5,60})/gi,
-    /(.{5,60})\s+(?:is done|is complete|is finished|done now|completed)/gi,
+  // Skip lines that are clearly instructions, not tasks
+  const skipPatterns = [
+    /^(add|put|classify|move|save|store|please|can you|could you|would you)/i,
+    /^(yes|no|ok|okay|sure|thanks|hi|hey|hello|good)/i,
+    /^(and add|all of this|the following|these tasks|this to)/i,
+    /\?$/,
   ];
-  donePatterns.forEach(pat => {
-    let m;
-    while ((m = pat.exec(t)) !== null) {
-      const phrase = m[1].trim();
-      S.tasks.forEach(task => {
-        if (!task.done && task.text.toLowerCase().split(' ').filter(w=>w.length>4).some(w=>phrase.includes(w))) {
-          S.tasks = S.tasks.map(x=>x.id===task.id?{...x,done:true}:x);
-          changed = true;
-        }
-      });
-      S.fus.forEach(fu => {
-        if (fu.status==='pending' && (phrase.includes(fu.person.toLowerCase()) || fu.task.toLowerCase().split(' ').filter(w=>w.length>4).some(w=>phrase.includes(w)))) {
-          S.fus = S.fus.map(x=>x.id===fu.id?{...x,status:'done'}:x);
-          changed = true;
-        }
-      });
-    }
-  });
 
-  // Extract new tasks line by line from user input only
-  const userLines = combined.split(/[\n,]+/).map(l=>l.trim()).filter(l=>l.length>6&&l.length<200);
-  userLines.forEach(line => {
-    const low = line.toLowerCase();
-    // Skip conversational lines
-    if (/^(yes|no|ok|okay|sure|thanks|hi|hello|hey|good|great|done|and|but|so|the|a |i |we |it )/.test(low)) return;
-    if (/^(athena|what|how|why|when|where|can you|could you|please|tell me|show me|help)/.test(low)) return;
+  lines.forEach(line => {
+    if (skipPatterns.some(p => p.test(line))) return;
+    if (line.length < 8) return;
 
     const result = classify(line);
-    const exists = result.section === 'followups'
-      ? S.fus.some(f=>f.person.toLowerCase()===result.person?.toLowerCase())
-      : S.tasks.some(x=>x.text.toLowerCase().trim()===line.toLowerCase().trim());
 
-    if (!exists) {
-      if (result.section === 'followups' && result.person) {
+    if (result.section === 'followups' && result.person) {
+      const exists = S.fus.some(f =>
+        f.person.toLowerCase() === result.person.toLowerCase()
+      );
+      if (!exists) {
         S.fus = [...S.fus, {id:uid(), person:result.person, task:result.task||line, status:'pending', ts:Date.now()}];
         changed = true;
-      } else if (['work','personal','contributions'].includes(result.section)) {
+      }
+    } else if (['work','personal','contributions'].includes(result.section)) {
+      const exists = S.tasks.some(x => x.text.toLowerCase().trim() === line.toLowerCase().trim());
+      if (!exists) {
         S.tasks = [...S.tasks, {id:uid(), text:line, section:result.section, urgency:result.urgency||'medium', done:false, ts:Date.now()}];
         changed = true;
       }
@@ -780,8 +765,11 @@ async function sendMsg(text) {
       } catch{}
     },200);
 
-    // Board sync — instant local classify, no extra API call
-    syncBoardFromText(text + ' ' + reply);
+    // Board sync — only when user explicitly asks to add tasks to board
+    const addIntent = /add (this|these|it|that|all|tasks?|items?)|put (this|these|all) (on|in|to) (my )?(board|list|work|personal|follow.?up|contributions?)|classify (this|these)|add to (board|work|personal)/i;
+    if (addIntent.test(text)) {
+      syncBoardFromText(text);
+    }
 
   } catch(e) {
     if(errBar){
