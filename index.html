@@ -204,11 +204,11 @@ html,body{height:100%;background:var(--bg);font-family:'Tenor Sans',serif;}
   <div class="key-screen">
     <div class="key-big"><span style="font-family:'Cormorant Garamond',serif;font-size:30px;color:#c8a864">Λ</span></div>
     <h2 style="font-family:'Cormorant Garamond',serif;font-size:26px;font-weight:300;color:#e8dfc8;letter-spacing:5px;text-transform:uppercase;margin-bottom:8px">Athena</h2>
-    <p style="font-family:'DM Mono',monospace;font-size:9.5px;color:#6a5a40;letter-spacing:1px;line-height:2;margin-bottom:26px">Your full Chief of Staff — proactive, opinionated,<br>one step ahead. Free with Groq.</p>
+    <p style="font-family:'DM Mono',monospace;font-size:9.5px;color:#6a5a40;letter-spacing:1px;line-height:2;margin-bottom:26px">Your full Chief of Staff — proactive, opinionated,<br>one step ahead. Free with OpenRouter.</p>
     <input id="keyInput" type="password" placeholder="AIza..." style="width:100%;max-width:380px;background:#14110a;border:1px solid #272010;border-radius:var(--r);padding:11px 14px;font-family:'DM Mono',monospace;font-size:12px;color:#e8dfc8;outline:none;text-align:center;transition:border-color .18s;">
     <button id="keyBtn" style="margin-top:10px;width:100%;max-width:380px;background:linear-gradient(135deg,#c8a864,#8a6020);border:none;border-radius:var(--r);padding:12px;font-family:'DM Mono',monospace;font-size:10px;color:#090805;font-weight:700;cursor:pointer;letter-spacing:1.5px;text-transform:uppercase;">Activate Athena →</button>
     <div id="keyErr" style="display:none;font-family:'DM Mono',monospace;font-size:9px;color:#d08080;margin-top:10px;"></div>
-    <p style="font-family:'DM Mono',monospace;font-size:8px;color:#3a3020;margin-top:14px;line-height:1.8">Free. Get your key at console.groq.com → API Keys</p>
+    <p style="font-family:'DM Mono',monospace;font-size:8px;color:#3a3020;margin-top:14px;line-height:1.8">Free. Get your key at openrouter.ai → API Keys</p>
   </div>
 </div>
 
@@ -405,7 +405,7 @@ const INIT_FUS = [];
 
 // ─── App State ────────────────────────────────────────────────
 let S = {
-  apiKey:   load(K.key) || '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',
+  apiKey:   load(K.key) || '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',
   mem:      load(K.mem)  || {facts:[],wins:[],priorities:[],people:{},lastSeen:null},
   messages: load(K.chat) || [],
   tasks:    load(K.tasks)|| INIT_TASKS,
@@ -434,14 +434,16 @@ function classify(text) {
 
 // ─── Claude API ───────────────────────────────────────────────
 async function callClaude(system, messages, maxTokens=900) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'Authorization': 'Bearer ' + S.apiKey,
+      'HTTP-Referer': 'https://athena-cos.github.io',
+      'X-Title': 'Athena Chief of Staff',
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model: 'meta-llama/llama-3.3-70b-instruct:free',
       max_tokens: maxTokens,
       temperature: 0.7,
       messages: [
@@ -457,7 +459,7 @@ async function callClaude(system, messages, maxTokens=900) {
   }
   const j = JSON.parse(text);
   const reply = j?.choices?.[0]?.message?.content;
-  if (!reply) throw new Error('Empty response from Groq');
+  if (!reply) throw new Error('Empty response');
   return reply;
 }
 
