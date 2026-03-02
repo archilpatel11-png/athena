@@ -525,12 +525,13 @@ function classify(text) {
 
 // ─── Claude API ───────────────────────────────────────────────
 async function callClaude(system, messages, maxTokens=900) {
-  // Free models in priority order — tries next if one fails
+  // Free models — openrouter/auto picks best available automatically
   const MODELS = [
+    'openrouter/auto',
     'meta-llama/llama-3.3-70b-instruct:free',
-    'mistralai/mistral-7b-instruct:free',
-    'google/gemma-3-12b-it:free',
-    'qwen/qwen2.5-72b-instruct:free',
+    'deepseek/deepseek-chat-v3-0324:free',
+    'mistralai/mistral-small-3.1-24b-instruct:free',
+    'meta-llama/llama-4-scout:free',
   ];
 
   const body = {
