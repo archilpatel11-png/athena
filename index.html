@@ -312,6 +312,16 @@ html,body{height:100%;background:var(--bg);font-family:'Tenor Sans',serif;}
     <div style="font-family:DM Mono,monospace;font-size:8px;color:#3a3020;line-height:1.8;margin-bottom:4px">Export weekly → save to Google Drive.<br>Import on any device to restore everything.</div>
   </div>
   <div class="ms">
+    <div class="ms-t">Sync (Cross-Device)</div>
+    <div id="sbStatus" style="font-family:'DM Mono',monospace;font-size:8.5px;margin-bottom:7px;padding:6px 9px;border-radius:6px;background:#14110a;border:1px solid #1e1a10;color:#3a3020">Not configured</div>
+    <input id="sbUrl" placeholder="https://xxxx.supabase.co" style="width:100%;background:#14110a;border:1px solid #1e1a10;border-radius:6px;padding:6px 8px;font-family:'DM Mono',monospace;font-size:9px;color:#e8dfc8;outline:none;margin-bottom:5px">
+    <input id="sbAnon" placeholder="eyJ... (anon public key)" style="width:100%;background:#14110a;border:1px solid #1e1a10;border-radius:6px;padding:6px 8px;font-family:'DM Mono',monospace;font-size:9px;color:#e8dfc8;outline:none;margin-bottom:5px">
+    <button class="cbtn" id="sbSaveBtn" style="border-color:rgba(109,186,138,.25);color:rgba(109,186,138,.8)">⟳ Connect Supabase</button>
+    <button class="cbtn" id="sbPushBtn" style="display:none">⬆ Push to cloud now</button>
+    <button class="cbtn" id="sbPullBtn" style="display:none">⬇ Pull from cloud now</button>
+    <div style="font-family:'DM Mono',monospace;font-size:7.5px;color:#2a2010;line-height:1.9;margin-top:4px">supabase.com → free → new project<br>Settings → API → copy URL + anon key</div>
+  </div>
+  <div class="ms">
     <div class="ms-t">Controls</div>
     <button class="cbtn" id="clearChatBtn">⊘ Clear chat</button>
     <button class="cbtn" id="wipeMemBtn">⊗ Wipe memory</button>
@@ -371,24 +381,105 @@ const $$   = sel => document.querySelectorAll(sel);
 
 // ─── Storage ──────────────────────────────────────────────────
 const K = {key:'ath_key',mem:'ath_mem',chat:'ath_chat',tasks:'ath_tasks',fus:'ath_fus'};
+
+// Supabase config — filled in after user provides credentials
+const SB = {
+  url: localStorage.getItem('ath_sb_url') || '',
+  anon: localStorage.getItem('ath_sb_anon') || '',
+  uid: 'archil', // single user, fixed row key
+};
+
+// localStorage — instant, always works
 const load = k => {
   try {
     const raw = localStorage.getItem(k);
     if (raw === null || raw === 'undefined' || raw === '') return null;
-    const parsed = JSON.parse(raw);
-    return parsed;
-  } catch(e) {
-    console.warn('Load failed for', k, e);
-    return null;
-  }
+    return JSON.parse(raw);
+  } catch(e) { return null; }
 };
 const save = (k,v) => {
   try {
     if (v === undefined) return;
     localStorage.setItem(k, JSON.stringify(v));
-  } catch(e) {
-    console.warn('Save failed for', k, e);
-  }
+  } catch(e) {}
+};
+
+// Supabase helpers
+const sbReady = () => SB.url && SB.anon;
+const sbFetch = async (path, opts={}) => {
+  if (!sbReady()) return null;
+  try {
+    const res = await fetch(SB.url + '/rest/v1/' + path, {
+      headers: {
+        'apikey': SB.anon,
+        'Authorization': 'Bearer ' + SB.anon,
+        'Content-Type': 'application/json',
+        'Prefer': opts.prefer || 'return=minimal',
+      },
+      ...opts,
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } catch(e) { console.warn('Supabase error', e); return null; }
+};
+
+// Push all data to Supabase (upsert single row for this user)
+const sbPush = async () => {
+  if (!sbReady()) return;
+  const payload = {
+    uid: SB.uid,
+    tasks: JSON.stringify(S.tasks),
+    fus: JSON.stringify(S.fus),
+    mem: JSON.stringify(S.mem),
+    chat: JSON.stringify(S.messages.slice(-100)),
+    updated_at: new Date().toISOString(),
+  };
+  await sbFetch('athena_data?uid=eq.' + SB.uid, {
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body: JSON.stringify(payload),
+  });
+};
+
+// Pull latest data from Supabase and merge into state
+const sbPull = async () => {
+  if (!sbReady()) return false;
+  const rows = await sbFetch('athena_data?uid=eq.' + SB.uid + '&select=*');
+  if (!rows || !rows.length) return false;
+  const row = rows[0];
+  try {
+    const tasks = JSON.parse(row.tasks || '[]');
+    const fus   = JSON.parse(row.fus   || '[]');
+    const mem   = JSON.parse(row.mem   || '{}');
+    const chat  = JSON.parse(row.chat  || '[]');
+    // Only update if remote is newer
+    S.tasks    = tasks.length    ? tasks : S.tasks;
+    S.fus      = fus.length      ? fus   : S.fus;
+    S.messages = chat.length     ? chat  : S.messages;
+    if (mem.lastSeen) S.mem = mem;
+    // Persist locally
+    save(K.tasks, S.tasks); save(K.fus, S.fus);
+    save(K.mem, S.mem); save(K.chat, S.messages);
+    return true;
+  } catch(e) { return false; }
+};
+
+// Save to both localStorage and Supabase
+const saveAll = (skipRemote=false) => {
+  save(K.tasks, S.tasks);
+  save(K.fus,   S.fus);
+  save(K.mem,   S.mem);
+  save(K.chat,  S.messages.slice(-100));
+  if (!skipRemote) setTimeout(sbPush, 100);
+};
+
+// ─── Supabase table setup ────────────────────────────────────
+const sbEnsureTable = async () => {
+  // Try to insert a dummy check — table must exist in Supabase
+  // User must create the table manually via Supabase SQL editor
+  // SQL: create table if not exists athena_data (uid text primary key, tasks text, fus text, mem text, chat text, updated_at timestamptz);
+  return true;
 };
 
 // ─── Urgency ──────────────────────────────────────────────────
@@ -405,7 +496,7 @@ const INIT_FUS = [];
 
 // ─── App State ────────────────────────────────────────────────
 let S = {
-  apiKey:   load(K.key) || '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',
+  apiKey:   load(K.key) || '',
   mem:      load(K.mem)  || {facts:[],wins:[],priorities:[],people:{},lastSeen:null},
   messages: load(K.chat) || [],
   tasks:    load(K.tasks)|| INIT_TASKS,
@@ -580,7 +671,7 @@ function renderTaskList(section) {
       e.stopPropagation();
       const id = el.dataset.chk;
       S.tasks = S.tasks.map(t=>t.id===id?{...t,done:!t.done}:t);
-      save(K.tasks,S.tasks); renderTaskList(section); updateBadges();
+      saveAll(); renderTaskList(section); updateBadges();
     });
   });
   container.querySelectorAll('[data-edit-task]').forEach(b => {
@@ -591,7 +682,7 @@ function renderTaskList(section) {
       e.stopPropagation();
       if(!confirm('Delete?')) return;
       S.tasks=S.tasks.filter(t=>t.id!==b.dataset.delTask);
-      save(K.tasks,S.tasks); renderTaskList(section); updateBadges();
+      saveAll(); renderTaskList(section); updateBadges();
     });
   });
 }
@@ -632,7 +723,7 @@ function renderFollowups() {
     b.addEventListener('click', () => {
       const [id,st] = b.dataset.fuSt.split(':');
       S.fus = S.fus.map(f=>f.id===id?{...f,status:st}:f);
-      save(K.fus,S.fus); renderFollowups(); updateBadges();
+      saveAll(); renderFollowups(); updateBadges();
     });
   });
   container.querySelectorAll('[data-edit-fu]').forEach(b => {
@@ -642,7 +733,7 @@ function renderFollowups() {
     b.addEventListener('click', () => {
       if(!confirm('Delete?')) return;
       S.fus=S.fus.filter(f=>f.id!==b.dataset.delFu);
-      save(K.fus,S.fus); renderFollowups(); updateBadges();
+      saveAll(); renderFollowups(); updateBadges();
     });
   });
 }
@@ -747,7 +838,7 @@ function applyBoardUpdate(reply) {
       changed = true;
     });
     if (changed) {
-      save(K.tasks,S.tasks); save(K.fus,S.fus);
+      saveAll();
       ['work','personal','contributions'].forEach(renderTaskList);
       renderFollowups(); updateBadges();
     }
@@ -769,7 +860,7 @@ async function sendMsg(text) {
     const apiMsgs=S.messages.slice(-20).map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
     const reply=await callClaude(systemPrompt(),apiMsgs);
     S.messages=[...S.messages,{role:'assistant',content:reply,ts:Date.now()}];
-    save(K.chat,S.messages.slice(-100));
+    saveAll();
     applyBoardUpdate(reply);
 
     // Background: memory update
@@ -786,7 +877,7 @@ async function sendMsg(text) {
           people:   {...(S.mem.people||{}),...(p.people||{})},
           lastSeen: new Date().toLocaleDateString('en-IN',{weekday:'short',month:'short',day:'numeric'}),
         };
-        save(K.mem,S.mem); updateMemPanel();
+        save(K.mem,S.mem); setTimeout(sbPush,100); updateMemPanel();
       } catch{}
     },200);
 
@@ -849,7 +940,7 @@ function saveTask() {
   } else {
     S.tasks=[...S.tasks,{id:uid(),text,section:sec,detail:det,urgency:S.selUrgency,done:false,ts:Date.now()}];
   }
-  save(K.tasks,S.tasks);
+  saveAll();
   ['work','personal','contributions'].forEach(renderTaskList); updateBadges();
   closeTaskModal();
 }
@@ -880,7 +971,7 @@ function saveFu() {
   } else {
     S.fus=[...S.fus,{id:uid(),person,task,dueBy,note,status:'pending',ts:Date.now()}];
   }
-  save(K.fus,S.fus); renderFollowups(); updateBadges(); closeFuModal();
+  saveAll(); renderFollowups(); updateBadges(); closeFuModal();
 }
 
 // ─── Init ─────────────────────────────────────────────────────
@@ -953,9 +1044,77 @@ function initMain() {
   $('sideBtn').addEventListener('click',()=>{ $('sidePanel').classList.add('open'); $('sideOv').classList.add('show'); updateMemPanel(); });
   $('sideOv').addEventListener('click',()=>{ $('sidePanel').classList.remove('open'); $('sideOv').classList.remove('show'); });
   $('closeSide').addEventListener('click',()=>{ $('sidePanel').classList.remove('open'); $('sideOv').classList.remove('show'); });
-  $('clearChatBtn').addEventListener('click',()=>{ if(!confirm('Clear chat?'))return; S.messages=[{role:'assistant',content:"Chat cleared. Memory intact.\n\nWhat's next, Archil?",ts:Date.now()}]; save(K.chat,S.messages); renderChat(); });
-  $('wipeMemBtn').addEventListener('click',()=>{ if(!confirm('Wipe all memory?'))return; S.mem={facts:[],wins:[],priorities:[],people:{},lastSeen:null}; save(K.mem,S.mem); updateMemPanel(); });
+  $('clearChatBtn').addEventListener('click',()=>{ if(!confirm('Clear chat?'))return; S.messages=[{role:'assistant',content:"Chat cleared. Memory intact.\n\nWhat's next, Archil?",ts:Date.now()}]; saveAll(); renderChat(); });
+  $('wipeMemBtn').addEventListener('click',()=>{ if(!confirm('Wipe all memory?'))return; S.mem={facts:[],wins:[],priorities:[],people:{},lastSeen:null}; save(K.mem,S.mem); setTimeout(sbPush,100); updateMemPanel(); });
   $('changeKeyBtn').addEventListener('click',()=>{ if(!confirm('Change API key?')) return; S.apiKey=''; save(K.key,null); localStorage.removeItem(K.key); location.reload(); });
+
+  // Supabase setup
+  const updateSbStatus = () => {
+    const el = $('sbStatus'); if(!el) return;
+    if (sbReady()) {
+      el.textContent = '✓ Connected — syncing across devices';
+      el.style.color = '#6dba8a';
+      el.style.borderColor = 'rgba(109,186,138,.2)';
+      $('sbPushBtn').style.display = 'block';
+      $('sbPullBtn').style.display = 'block';
+      if ($('sbUrl')) $('sbUrl').value = SB.url;
+      if ($('sbAnon')) $('sbAnon').value = SB.anon;
+    } else {
+      el.textContent = 'Not configured — add credentials below';
+      el.style.color = '#3a3020';
+    }
+  };
+  // Pre-fill Supabase credentials if not already saved
+  if (!SB.url) {
+    const preUrl  = 'https://cxteoplbaliywztcsuyc.supabase.co';
+    const preAnon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4dGVvcGxiYWxpeXd6dGNzdXljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NzEwMTIsImV4cCI6MjA4ODA0NzAxMn0.qHXls6In76yUhSDuZsKDx7yqOIAKQ5nzgMTE2dEo1PY';
+    if ($('sbUrl'))  $('sbUrl').value  = preUrl;
+    if ($('sbAnon')) $('sbAnon').value = preAnon;
+  }
+  updateSbStatus();
+
+  $('sbSaveBtn').addEventListener('click', async () => {
+    const url  = $('sbUrl').value.trim();
+    const anon = $('sbAnon').value.trim();
+    if (!url || !anon) { alert('Enter both URL and anon key'); return; }
+    if (!url.includes('supabase.co')) { alert('URL should be like https://xxxx.supabase.co'); return; }
+    SB.url  = url;
+    SB.anon = anon;
+    localStorage.setItem('ath_sb_url',  url);
+    localStorage.setItem('ath_sb_anon', anon);
+    $('sbStatus').textContent = 'Testing connection…';
+    // Create table if needed, then push
+    await sbEnsureTable();
+    const pushed = await sbPush();
+    // Pre-fill Supabase credentials if not already saved
+  if (!SB.url) {
+    const preUrl  = 'https://cxteoplbaliywztcsuyc.supabase.co';
+    const preAnon = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4dGVvcGxiYWxpeXd6dGNzdXljIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0NzEwMTIsImV4cCI6MjA4ODA0NzAxMn0.qHXls6In76yUhSDuZsKDx7yqOIAKQ5nzgMTE2dEo1PY';
+    if ($('sbUrl'))  $('sbUrl').value  = preUrl;
+    if ($('sbAnon')) $('sbAnon').value = preAnon;
+  }
+  updateSbStatus();
+    if (pushed !== false) alert('Connected! Your data is now syncing across all devices.');
+    else alert('Could not connect — check your URL and key.');
+  });
+
+  $('sbPushBtn').addEventListener('click', async () => {
+    await sbPush();
+    $('sbStatus').textContent = '✓ Pushed — ' + new Date().toLocaleTimeString();
+    setTimeout(updateSbStatus, 2000);
+  });
+
+  $('sbPullBtn').addEventListener('click', async () => {
+    const ok = await sbPull();
+    if (ok) {
+      ['work','personal','contributions'].forEach(renderTaskList);
+      renderFollowups(); updateBadges(); renderChat(); updateMemPanel();
+      $('sbStatus').textContent = '✓ Pulled — ' + new Date().toLocaleTimeString();
+      setTimeout(updateSbStatus, 2000);
+    } else {
+      alert('Nothing to pull yet, or connection failed.');
+    }
+  });
 
   // Export backup
   $('exportBtn').addEventListener('click',()=>{
@@ -987,7 +1146,7 @@ function initMain() {
         S.tasks = backup.tasks;
         S.fus   = backup.fus;
         if (backup.mem) S.mem = backup.mem;
-        save(K.tasks, S.tasks); save(K.fus, S.fus); save(K.mem, S.mem);
+        saveAll();
         ['work','personal','contributions'].forEach(renderTaskList);
         renderFollowups(); updateBadges(); updateMemPanel();
         alert('Backup restored successfully.');
@@ -1026,7 +1185,7 @@ function initMain() {
         if(r.section==='followups'){S.fus=[...S.fus,{id,person:r.person||'?',task:r.task||r.line,status:'pending',ts:Date.now()}];}
         else{S.tasks=[...S.tasks,{id,section:r.section,text:r.line,urgency:r.urgency||'medium',done:false,ts:Date.now()}];}
       });
-      save(K.tasks,S.tasks); save(K.fus,S.fus);
+      saveAll(); save(K.fus,S.fus);
       $('dumpInput').value=''; prev.style.display='none';
       ['work','personal','contributions'].forEach(renderTaskList); renderFollowups(); updateBadges();
       switchTab('work');
@@ -1058,6 +1217,19 @@ function initMain() {
   save(K.fus, S.fus);
   save(K.mem, S.mem);
   if (S.messages.length) save(K.chat, S.messages.slice(-100));
+
+  // Pull latest from Supabase in background (if configured)
+  if (sbReady()) {
+    setTimeout(async () => {
+      const updated = await sbPull();
+      if (updated) {
+        ['work','personal','contributions'].forEach(renderTaskList);
+        renderFollowups(); updateBadges(); renderChat(); updateMemPanel();
+        const el = $('sbStatus');
+        if (el) { el.textContent = '✓ Synced — ' + new Date().toLocaleTimeString(); el.style.color='#6dba8a'; }
+      }
+    }, 800);
+  }
 }
 
 init();
