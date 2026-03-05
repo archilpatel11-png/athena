@@ -486,16 +486,35 @@ let S = {
 // ── LOCAL CLASSIFIER ──────────────────────────────────
 function classify(text) {
   const t = text.toLowerCase();
-  const fuM = t.match(/(?:follow.?up\s+(?:with\s+)?|chase\s+|waiting\s+on\s+)([a-z]+)\s*(?:on|re|about|for)?\s*(.*)/i)
-    || t.match(/([a-z]+)\s+(?:owes|promised|committed|needs to)\s+(.*)/i);
-  if (fuM) return {section:'followups',person:fuM[1],task:(fuM[2]||text).trim()};
-  let urgency='medium';
-  if (/urgent|asap|today|tonight|now|critical|immediately|deadline/.test(t)) urgency='critical';
-  else if (/tomorrow|this week|high priority|soon/.test(t)) urgency='high';
-  else if (/someday|eventually|later|low priority/.test(t)) urgency='low';
-  if (/\bpri\b|pull request|write.?up|draft|proposal|rfc|spec|contribute/.test(t)) return {section:'contributions',urgency};
-  if (/book|flight|hotel|personal|family|friend|buy|doctor|gym|travel|birthday|money|transfer/.test(t)) return {section:'personal',urgency};
-  return {section:'work',urgency};
+
+  // Urgency
+  let urgency = 'medium';
+  if (/\b(urgent|asap|today|tonight|now|critical|immediately|deadline|eod|end of day)\b/.test(t)) urgency = 'critical';
+  else if (/\b(tomorrow|this week|high priority|soon|end of week|eow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(t)) urgency = 'high';
+  else if (/\b(someday|eventually|later|low priority|when possible|no rush)\b/.test(t)) urgency = 'low';
+
+  // Follow-up: "check with X", "follow up with X", "waiting on X", "chase X", "ping X", "X owes", "X promised"
+  // Run on original text to preserve name casing
+  const fuPerson = text.match(/(?:follow.?up with|check with|waiting on|chase|ping|ask|remind)\s+([A-Za-z]+)/i)
+    || text.match(/([A-Za-z]+)\s+(?:owes|promised|committed|needs to send|needs to share)/i);
+  if (fuPerson) {
+    const person = fuPerson[1];
+    // Don't classify common non-names as person
+    if (!/^(me|us|the|my|our|this|that|it|him|her|them)$/i.test(person)) {
+      return { section:'followups', person, task: text.trim(), urgency };
+    }
+  }
+
+  // Contributions / PRIs
+  if (/\b(pri\b|pris\b|pull request|write.?up|proposal|rfc|spec|strategy doc|okr|roadmap|impact|contribution|strategic)\b/.test(t))
+    return { section:'contributions', urgency };
+
+  // Personal
+  if (/\b(personal|family|friend|flight|hotel|book ticket|doctor|hospital|gym|workout|grocery|birthday|anniversary|money|transfer|rent|insurance|visa|passport|travel|trip|vacation|weekend|dinner reservation|buy|shopping)\b/.test(t))
+    return { section:'personal', urgency };
+
+  // Default work
+  return { section:'work', urgency };
 }
 
 // ── BOARD RENDER ──────────────────────────────────────
@@ -710,7 +729,13 @@ RULES:
 3. Push back when Archil avoids something or thinks below Director level.
 4. End substantive replies with ACTION ITEMS: [numbered list].
 5. Concise and direct. No filler.
-6. When user mentions new tasks or commitments, confirm what you've noted — the board updates automatically from their words.`;
+6. When you add items to the board, ALWAYS end with a structured block:
+BOARD UPDATE:
+Work: [bullet list of work tasks added, or "none"]
+Personal: [bullet list or "none"]
+Follow-ups: [bullet list like "• Check with Chiranjeevi on X", or "none"]
+Contributions: [bullet list or "none"]
+Only include sections that have new items. Skip if nothing changed.`;
 }
 
 // ── GROQ API ──────────────────────────────────────────
@@ -733,51 +758,113 @@ async function callGroq(messages) {
   return data.choices[0].message.content;
 }
 
-// ── LOCAL BOARD UPDATE (from user's own words — ZERO extra tokens) ────
+// ── LOCAL BOARD UPDATE from user message ─────────────
+function addToBoard(text, section, urgency, person) {
+  text = text.trim();
+  if (text.length < 4) return;
+  if (section === 'followups') {
+    if (!S.fus.some(f => f.task.toLowerCase() === text.toLowerCase()))
+      S.fus = [...S.fus, {id:uid(), person:person||'?', task:text, status:'pending', ts:Date.now()}];
+  } else {
+    if (!S.tasks.some(t => t.text.toLowerCase() === text.toLowerCase()))
+      S.tasks = [...S.tasks, {id:uid(), section, text, urgency:urgency||'medium', done:false, ts:Date.now()}];
+  }
+}
+
 function updateBoardFromUser(text) {
   const t = text.trim();
+  if (!t) return;
 
-  // Clear intent
+  // Clear board intent
   if (/^(clear|delete|wipe|remove)\s+(all|every)?\s*(tasks?|board|everything|list)/i.test(t)) {
-    S.tasks=[]; S.fus=[];
-    renderBoard(); updateBadges();
+    S.tasks = []; S.fus = [];
+    renderBoard(); updateBadges(); saveAll();
     return;
   }
 
-  // Multi-line list
-  const lines = t.split('\n').map(l=>l.replace(/^[-•*\d.]+\s*/,'').trim()).filter(l=>l.length>3);
-  const isList = lines.length>=2 && (/^[-•*\d]/.test(t) || /^(here are|my tasks|tasks:|today:)/i.test(t));
+  // Explicit section prefixes: "work: X" "personal: X" "followup with X: Y"
+  const sectionPrefix = t.match(/^(work|personal|contributions?|contrib|follow.?up):\s*(.+)/i);
+  if (sectionPrefix) {
+    const sec = sectionPrefix[1].toLowerCase();
+    const task = sectionPrefix[2].trim();
+    const mapped = /contrib/.test(sec) ? 'contributions' : /follow/.test(sec) ? 'followups' : sec;
+    const r = classify(task);
+    addToBoard(task, mapped, r.urgency, r.person);
+    renderBoard(); updateBadges(); saveAll();
+    return;
+  }
 
+  // Multi-line dump: treat each line as a separate item
+  const lines = t.split('\n').map(l => l.replace(/^[-•*◆◈✦↻\d.]+\s*/, '').trim()).filter(l => l.length > 3);
+  const isList = lines.length >= 2 && (/^[-•*◆\d]/.test(t) || /^(here are|my tasks|tasks:|today:|add these)/i.test(t));
   if (isList) {
     lines.forEach(line => {
       const r = classify(line);
-      if (r.section==='followups') {
-        if (!S.fus.some(f=>f.task.toLowerCase()===line.toLowerCase()))
-          S.fus=[...S.fus,{id:uid(),person:r.person||'?',task:r.task||line,status:'pending',ts:Date.now()}];
-      } else {
-        if (!S.tasks.some(t=>t.text.toLowerCase()===line.toLowerCase()))
-          S.tasks=[...S.tasks,{id:uid(),section:r.section,text:line,urgency:r.urgency,done:false,ts:Date.now()}];
-      }
+      addToBoard(r.section === 'followups' ? (r.task || line) : line, r.section, r.urgency, r.person);
     });
     renderBoard(); updateBadges(); saveAll();
     return;
   }
 
-  // Single-line task detection — explicit task language
-  const taskIntent = /\b(need to|have to|must|remind me to|add|book|call|send|review|finish|submit|schedule|prepare|draft|check|ping|update|follow.?up|complete)\b/i;
-  const notQuestion = !/\?$/.test(t) && t.length > 8;
-  if (taskIntent.test(t) && notQuestion) {
+  // Single line — detect task intent (not a question, not just chat)
+  const isQuestion = /\?$/.test(t);
+  const isChatOnly = /^(ok|okay|sure|thanks|got it|noted|yes|no|yep|nope|hmm|hi|hello|hey|what|how|why|when|who|tell me|explain|what do you think|thoughts|thoughts\?)/i.test(t);
+  if (isQuestion || isChatOnly || t.length < 6) return;
+
+  const taskIntent = /\b(need to|have to|must|remind me to|add|book|call|send|review|finish|submit|schedule|prepare|draft|check with|ping|update|follow.?up|complete|buy|write|fix|handle|sort out|look into|research|discuss|meet|catch up|chase)\b/i;
+  if (taskIntent.test(t)) {
     const r = classify(t);
-    if (r.section==='followups') {
-      if (!S.fus.some(f=>f.task.toLowerCase()===t.toLowerCase()))
-        S.fus=[...S.fus,{id:uid(),person:r.person||'?',task:r.task||t,status:'pending',ts:Date.now()}];
-    } else {
-      const clean = t.replace(/^(add|remind me to|i need to|i have to|must)\s+/i,'').trim();
-      if (!S.tasks.some(task=>task.text.toLowerCase()===clean.toLowerCase()))
-        S.tasks=[...S.tasks,{id:uid(),section:r.section,text:clean,urgency:r.urgency,done:false,ts:Date.now()}];
-    }
+    const clean = t.replace(/^(add|remind me to|i need to|i have to|need to|must|please)\s+/i, '').trim();
+    addToBoard(r.section === 'followups' ? (r.task || clean) : clean, r.section, r.urgency, r.person);
     renderBoard(); updateBadges(); saveAll();
   }
+}
+
+// ── PARSE ATHENA REPLY FOR BOARD ITEMS ────────────────
+function updateBoardFromReply(reply) {
+  if (!reply || typeof reply !== 'string') return;
+
+  // Find BOARD UPDATE: block in reply
+  const buIdx = reply.toUpperCase().indexOf('BOARD UPDATE');
+  if (buIdx === -1) return;
+
+  const block = reply.slice(buIdx);
+  let changed = false;
+
+  // Parse each section: Work, Personal, Contributions, Follow-ups
+  const sections = {
+    work:          /work[:\s]+([\s\S]*?)(?=personal:|contributions?:|follow.?ups?:|action items:|$)/i,
+    personal:      /personal[:\s]+([\s\S]*?)(?=work:|contributions?:|follow.?ups?:|action items:|$)/i,
+    contributions: /contributions?[:\s]+([\s\S]*?)(?=work:|personal:|follow.?ups?:|action items:|$)/i,
+    followups:     /follow.?ups?[:\s]+([\s\S]*?)(?=work:|personal:|contributions?:|action items:|$)/i,
+  };
+
+  Object.entries(sections).forEach(([section, regex]) => {
+    const m = block.match(regex);
+    if (!m) return;
+    const lines = m[1].split('\n')
+      .map(l => l.replace(/^[◆◈•\-\*✦↻\d\.]+\s*/, '').trim())
+      .filter(l => l.length > 4 && !/^(none|n\/a|nothing|-)$/i.test(l));
+
+    lines.forEach(task => {
+      if (section === 'followups') {
+        const pm = task.match(/(?:check with|follow.?up with|ping|ask|waiting on|chase|remind)\s+([A-Za-z]+)/i);
+        const person = pm ? pm[1] : '?';
+        if (!S.fus.some(f => f.task.toLowerCase() === task.toLowerCase())) {
+          S.fus = [...S.fus, {id:uid(), person, task, status:'pending', ts:Date.now()}];
+          changed = true;
+        }
+      } else {
+        const r = classify(task);
+        if (!S.tasks.some(t => t.text.toLowerCase() === task.toLowerCase())) {
+          S.tasks = [...S.tasks, {id:uid(), section, text:task, urgency:r.urgency||'medium', done:false, ts:Date.now()}];
+          changed = true;
+        }
+      }
+    });
+  });
+
+  if (changed) { renderBoard(); updateBadges(); saveAll(); }
 }
 
 // ── SEND ──────────────────────────────────────────────
@@ -801,6 +888,7 @@ async function sendMsg(text) {
     }));
     const reply = await callGroq(msgs);
     S.messages=[...S.messages,{role:'assistant',content:reply,ts:Date.now()}];
+    updateBoardFromReply(reply);
     saveAll();
   } catch(e) {
     if(errBar){
